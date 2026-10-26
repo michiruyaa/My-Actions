@@ -91,10 +91,11 @@ class CaiYunAuth:
     SSO_TOKEN_URL = "https://orches.yun.139.com/orchestration/auth-rebuild/token/v1.0/querySpecToken"
     SSO_TOKEN_URL_V2 = "https://user-njs.yun.139.com/user/querySpecToken"
 
-    JWT_TOKEN_URLS = [
-        "https://caiyun.feixin.10086.cn/portal/auth/tyrzLogin.action",
-        "https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action",
-    ]
+                                                                        
+                                                                      
+                                                                               
+    TYRZ_LOGIN_URL = "https://m.mcloud.139.com/ycloud/auth-service/auth/tyrzLogin"
+    SIGN_KEY = "sekaMdYYLIZfbCfm"
 
     def __init__(self, phone: str, auth_token: str):
         self.phone = str(phone)
@@ -157,32 +158,55 @@ class CaiYunAuth:
         if not self.sso_token:
             log_error("缺少 SSO Token，无法获取 JWT Token")
             return False
-        log_info("正在获取 JWT Token...")
-        for url in self.JWT_TOKEN_URLS:
-            try:
-                headers = {
-                    "User-Agent": UA,
-                    "Content-Type": "application/json",
-                    "Accept": "*/*",
-                    "Host": "caiyun.feixin.10086.cn",
-                    "Referer": "https://caiyun.feixin.10086.cn/",
-                }
-                full_url = f"{url}?ssoToken={self.sso_token}"
-                for method in ["POST", "GET"]:
-                    resp = self.session.request(
-                        method, full_url, headers=headers, timeout=REQ_TIMEOUT
-                    )
-                    result = resp.json()
-                    if result.get("code") == 0 and result.get("result", {}).get("token"):
-                        self.jwt_token = result["result"]["token"]
-                        log_success(f"JWT Token 获取成功 ({method})")
-                        return True
-                log_info(f"端点返回: {result.get('msg', '未知')}")
-            except Exception as e:
-                log_info(f"端点异常: {e}")
-                continue
-        log_error("所有 JWT 端点均失败")
-        return False
+        log_info("正在获取 JWT Token (tyrzLogin)...")
+        request_id = str(uuid.uuid4())
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(uuid.uuid4())
+        signature = hashlib.md5(
+            (self.SIGN_KEY + request_id + timestamp + nonce + self.SIGN_KEY).encode()
+        ).hexdigest()
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "User-Agent": UA,
+            "appversion": "13.1.1.0",
+            "activityid": "sign_in_3",
+            "showloading": "true",
+            "x-requested-with": "com.chinamobile.mcloud",
+            "Origin": "https://m.mcloud.139.com",
+            "cache-control": "no-cache",
+            "Referer": (
+                "https://m.mcloud.139.com/portal/mobilecloud/index.html"
+                "?path=newsignin&sourceid=1002&enableShare=1&token="
+            ),
+            "x-request-id": request_id,
+            "x-timestamp": timestamp,
+            "x-nonce": nonce,
+            "x-signature": signature,
+        }
+        data = {
+            "token": self.sso_token,
+            "openAccount": 0,
+            "marketName": "sign_in_3",
+            "sourceId": "1002",
+        }
+        try:
+            resp = self.session.post(
+                self.TYRZ_LOGIN_URL, headers=headers, json=data, timeout=REQ_TIMEOUT
+            )
+            result = resp.json()
+            if result.get("code") == 0 and result.get("result", {}).get("token"):
+                self.jwt_token = result["result"]["token"]
+                                                       
+                self.session.cookies.set(
+                    "jwtToken", self.jwt_token, domain="m.mcloud.139.com", path="/"
+                )
+                log_success("JWT Token 获取成功")
+                return True
+            log_error(f"tyrzLogin 失败: {result.get('msg', '未知错误')}")
+            return False
+        except Exception as e:
+            log_error(f"tyrzLogin 异常: {e}")
+            return False
 
     def authenticate(self) -> bool:
         log_title("认证流程")
@@ -218,7 +242,7 @@ class CaiYunAuth:
 
 class SignInService:
     BASE_URL = "https://m.mcloud.139.com"
-    # .thumbcache cookie 的 hash (由 fp.min.js 指纹脚本生成, 同一设备固定)
+                                                            
     THUMBCACHE_HASH = "45700955f71be4ef518b0a1af26a3f40"
 
     def __init__(self, auth: CaiYunAuth, client_type: str = "app", device_id: Optional[str] = None,
@@ -226,7 +250,7 @@ class SignInService:
         self.auth = auth
         self.client_type = client_type
         fp = fingerprint or {}
-        # 优先使用抓包得到的真实设备指纹(领取云朵的风控必需), 缺失时才回退到随机生成
+                                                 
         self.device_id = device_id or fp.get("device_id") or self._generate_device_id()
         self._smid = fp.get("smid") or ""
         self._thumbcache = fp.get("thumbcache") or ""
@@ -234,28 +258,25 @@ class SignInService:
         self._init_market_cookies()
 
     def _generate_device_id(self) -> str:
-        """生成 deviceId (HAR 格式: B + base64(48字节随机数))"""
         import base64 as b64
         raw = os.urandom(48)
         return "B" + b64.b64encode(raw).decode()[:86] + "=="
 
     def _init_market_cookies(self):
-        """在 m.mcloud.139.com 域上设置 .thumbcache/smidV2/_c_WBKFRo/userDomainId cookie
-        领取云朵会触发风控, 必须使用抓包得到的真实设备指纹, 否则返回“活动太火爆啦，锁定失败”。"""
         s = self.auth.session
-        # .thumbcache 值 = deviceId 去掉首字符 "B" (优先用抓包真实值)
+                                                       
         thumb_val = self._thumbcache or (
             self.device_id[1:] if self.device_id.startswith("B") else self.device_id
         )
         s.cookies.set(f".thumbcache_{self.THUMBCACHE_HASH}", thumb_val,
                        domain="m.mcloud.139.com", path="/")
-        # smidV2: 指纹 SDK 生成(格式为 时间戳+hash), 优先用抓包真实值
+                                                   
         smid_val = self._smid or (uuid.uuid4().hex + uuid.uuid4().hex[:16])
         s.cookies.set("smidV2", smid_val, domain="m.mcloud.139.com", path="/")
-        # _c_WBKFRo: 风控 cookie, 抓包中存在时透传
+                                        
         if self._c_wbkfro:
             s.cookies.set("_c_WBKFRo", self._c_wbkfro, domain="m.mcloud.139.com", path="/")
-        # userDomainId 从 JWT payload 提取
+                                       
         if self.auth.jwt_token:
             import base64 as b64, json as _json
             parts = self.auth.jwt_token.split(".")
@@ -276,7 +297,7 @@ class SignInService:
 
     def _request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
         headers = self.auth.get_headers()
-        # 使用驼峰命名匹配 HAR 抓包(Java 服务器可能区分大小写)
+                                          
         headers["jwtToken"] = headers.pop("jwtToken", self.auth.jwt_token or "")
         headers["deviceId"] = self.device_id
         headers["activityId"] = "sign_in_3"
@@ -284,15 +305,15 @@ class SignInService:
         headers["X-Requested-With"] = "com.chinamobile.mcloud"
         headers["showLoading"] = "true"
         headers["Cache-Control"] = "no-cache"
-        # 修正 Host/Referer 以匹配 m.mcloud.139.com (HAR: Referer 含 SSO token)
+                                                                         
         headers["Host"] = "m.mcloud.139.com"
         sso = self.auth.sso_token or ""
         headers["Referer"] = (
             "https://m.mcloud.139.com/portal/mobilecloud/index.html"
-            "?path=newsignin&sourceid=1097&enableShare=1"
+            "?path=newsignin&sourceid=1002&enableShare=1"
             f"&token={sso}&targetSourceId=001005"
         )
-        # GET 请求不需要 Content-Type
+                                
         if method.upper() == "GET":
             headers.pop("Content-Type", None)
         cookies = self.auth.get_cookies()
@@ -345,7 +366,6 @@ class SignInService:
             return False
 
     def _get_user_domain_id(self) -> Optional[str]:
-        """ 从 getAccount 获取 userDomainId """
         try:
             resp = self.auth.session.post(
                 f"{self.BASE_URL}/ycloud/auth-service/auth/getAccount",
@@ -388,7 +408,7 @@ class SignInService:
             log_info("无任务数据")
             return
 
-        # 只做可通过 click 完成的任务，其他忽略
+                                
         do_ids = {605, 606, 585, 431}
 
         for task in tasks:
@@ -417,7 +437,6 @@ class SignInService:
                 log_warn(f"任务 {task_id} 返回: {data.get('msg', '未知')}")
 
     def _post_journaling(self, keyword: str):
-        """发送 visitlog/journaling 埋点(领取前必需, 建立服务端会话状态)"""
         url = f"{self.BASE_URL}/ycloud/visitlog/journaling"
         payload = (f"module=uservisit&optkeyword={keyword}"
                    f"&sourceid=1097&marketName=sign_in_3")
@@ -426,7 +445,6 @@ class SignInService:
         })
 
     def _prepare_receive_session(self):
-        """领取前发送埋点序列(参考工作脚本: 7次journaling含receive_type)"""
         for keyword in (
             "newsignin_index_pv",
             "newsignin_index_client",
@@ -440,11 +458,6 @@ class SignInService:
             self._sleep(0.3, 0.5)
 
     def _receive_warmup(self) -> Tuple[list, int]:
-        """领取前的会话预热序列(严格对照 ProxyPin 抓包中真实 App 的顺序):
-            infoV3 -> taskListV3 -> getPopInfo -> popup -> journaling(newsignin_index_receive_type)
-        缺少 getPopInfo/popup 会导致服务端返回“活动太火爆啦，锁定失败”。
-        返回 (receiveList, toReceive)。
-        """
         info_url = f"{self.BASE_URL}/ycloud/signin/page/infoV3?client={self.client_type}"
         receive_list: list = []
         to_receive = 0
@@ -457,14 +470,14 @@ class SignInService:
                 to_receive = r.get("toReceive", 0)
         self._sleep(0.3, 0.6)
 
-        # taskListV3
+                    
         self._request(
             "POST", f"{self.BASE_URL}/ycloud/signin/task/taskListV3",
             json={"marketname": "sign_in_3", "clientVersion": "13.1.1"},
         )
         self._sleep(0.3, 0.6)
 
-        # getPopInfo
+                    
         self._request(
             "POST", f"{self.BASE_URL}/ycloud/signin/public/getPopInfo",
             json={"clientType": "android", "version": "13.1.1"},
@@ -472,18 +485,17 @@ class SignInService:
         )
         self._sleep(0.3, 0.6)
 
-        # popup
+               
         self._request("GET", f"{self.BASE_URL}/ycloud/signin/page/popup")
         self._sleep(0.3, 0.6)
 
-        # journaling: 领取动作埋点(receive_type)
+                                          
         self._post_journaling("newsignin_index_receive_type")
         self._sleep(0.3, 0.5)
 
         return receive_list, to_receive
 
     def _claim_cloud(self, cloud_id: int) -> bool:
-        """通过 /ycloud/ 路径领取指定云朵(fallback)"""
         url = f"{self.BASE_URL}/ycloud/signin/page/receiveV2?client={self.client_type}&cloudId={cloud_id}"
         resp = self._request("GET", url)
         if not resp:
@@ -498,7 +510,7 @@ class SignInService:
 
     def receive(self):
         log_title("云朵汇总")
-        # 页面级埋点(模拟 App 进入签到页)
+                             
         self._prepare_receive_session()
         self._sleep()
 
@@ -506,8 +518,8 @@ class SignInService:
         consecutive_fail = 0
         info_url = f"{self.BASE_URL}/ycloud/signin/page/infoV3?client={self.client_type}"
 
-        # 严格对照抓包: 每领取一笔前都要走一遍预热序列(infoV3→taskListV3→getPopInfo→popup→journaling)
-        # 以获取服务端“锁定”，随后 GET /ycloud/signin/page/receiveV2?client=app&cloudId={recordId}
+                                                                                
+                                                                                       
         MAX_ROUNDS = 40
         for _ in range(MAX_ROUNDS):
             receive_list, to_receive = self._receive_warmup()
@@ -528,13 +540,13 @@ class SignInService:
                 consecutive_fail = 0
             else:
                 consecutive_fail += 1
-                # 连续两次锁定失败则停止，避免无意义重试
+                                     
                 if consecutive_fail >= 2:
                     log_warn("连续领取失败(锁定失败)，停止本轮领取")
                     break
             self._sleep(0.8, 1.5)
 
-        # 最终汇总
+              
         info_resp = self._request("GET", info_url)
         if not info_resp:
             log_error("云朵信息查询失败")
