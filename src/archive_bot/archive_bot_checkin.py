@@ -1,11 +1,11 @@
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import requests
-import yaml
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -19,9 +19,19 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DEFAULT_ADDRESSES = {
-    "ehArBot": "https://eh-arc-api.mhdy.icu",
-    "archiveAtHome": "https://api.archive-at-home.org/jhentai",
+    "eharbot": "https://eh-arc-api.mhdy.icu",
+    "ntrehbot": "https://ehbot-api.ntr.you",
+    "archiveathome": "https://api.archive-at-home.org/jhentai",
 }
+
+GP_UNITS = {
+    "ntrehbot": "纯爱点",
+}
+
+EH_AR_BOT_TYPES = ("eharbot", "ntrehbot")
+ARCHIVE_AT_HOME_TYPES = ("archiveathome",)
+
+ACCOUNT_SECRETS = ["ARCHIVE_BOT"] + [f"ARCHIVE_BOT_{i}" for i in range(1, 6)]
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -38,21 +48,33 @@ class CheckInResult:
     message: str = ""
 
 
-def load_config() -> dict:
-    config_path = Path(__file__).parent / "config.yaml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"配置文件不存在: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    return config or {}
+def parse_account(text: str) -> dict:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    keys = ("bot_type", "api_address", "api_key")
+    account = {key: (lines[i] if i < len(lines) else "") for i, key in enumerate(keys)}
+
+    bot_type_lower = account["bot_type"].lower()
+    if not account["api_address"].lower().startswith("http"):
+        account["api_key"] = account["api_address"]
+        account["api_address"] = DEFAULT_ADDRESSES.get(bot_type_lower, DEFAULT_ADDRESSES["eharbot"])
+
+    return account
 
 
-def query_balance_eh_ar_bot(api_address: str, api_key: str) -> Optional[int]:
-    url = f"{api_address}/balance"
+def load_accounts() -> list:
+    accounts = []
+    for name in ACCOUNT_SECRETS:
+        value = os.environ.get(name)
+        if value and value.strip():
+            accounts.append(parse_account(value))
+    return accounts
+
+
+def query_balance_eh_ar_bot(api_address: str, api_key: str, label: str) -> Optional[int]:
     try:
-        resp = requests.post(url, headers=HEADERS, json={"apikey": api_key}, timeout=30)
+        resp = requests.post(f"{api_address}/balance", headers=HEADERS, json={"apikey": api_key}, timeout=30)
         data = resp.json()
-        log.info(f"[EH-ArBot] balance response: {data}")
+        log.info(f"[{label}] balance response: {data}")
         if data.get("code") == 0:
             balance_data = data.get("data", {})
             return (
@@ -66,12 +88,11 @@ def query_balance_eh_ar_bot(api_address: str, api_key: str) -> Optional[int]:
     return None
 
 
-def check_in_eh_ar_bot(api_address: str, api_key: str) -> CheckInResult:
-    url = f"{api_address}/checkin"
+def check_in_eh_ar_bot(api_address: str, api_key: str, label: str) -> CheckInResult:
     try:
-        resp = requests.post(url, headers=HEADERS, json={"apikey": api_key}, timeout=30)
+        resp = requests.post(f"{api_address}/checkin", headers=HEADERS, json={"apikey": api_key}, timeout=30)
         data = resp.json()
-        log.info(f"[EH-ArBot] checkin response: {data}")
+        log.info(f"[{label}] checkin response: {data}")
         code = data.get("code")
         if code == 0:
             checkin_data = data.get("data", {})
@@ -89,10 +110,9 @@ def check_in_eh_ar_bot(api_address: str, api_key: str) -> CheckInResult:
 
 
 def query_balance_archive_at_home(api_address: str, api_key: str) -> Optional[int]:
-    url = f"{api_address}/api/v1/me/balance"
     try:
         resp = requests.get(
-            url,
+            f"{api_address}/api/v1/me/balance",
             headers={
                 **HEADERS,
                 "Authorization": f"Bearer {api_key}",
@@ -117,10 +137,9 @@ def query_balance_archive_at_home(api_address: str, api_key: str) -> Optional[in
 
 
 def check_in_archive_at_home(api_address: str, api_key: str) -> CheckInResult:
-    url = f"{api_address}/api/v1/me/checkin"
     try:
         resp = requests.post(
-            url,
+            f"{api_address}/api/v1/me/checkin",
             headers={
                 **HEADERS,
                 "Authorization": f"Bearer {api_key}",
@@ -148,35 +167,27 @@ def check_in_archive_at_home(api_address: str, api_key: str) -> CheckInResult:
         return CheckInResult(success=False, message=str(e))
 
 
-def get_account_label(index: int) -> str:
-    if index == 0:
-        return "默认账号"
-    return f"账号{index}"
-
-
-def process_account(account_config: dict, index: int) -> bool:
-    bot_type = (account_config.get("bot_type") or account_config.get("type") or "ehArBot").strip()
-    api_address = (account_config.get("api_address") or "").strip()
-    api_key = (account_config.get("api_key") or account_config.get("apikey") or "").strip()
+def process_account(account: dict, index: int) -> bool:
+    bot_type = account["bot_type"]
+    api_address = account["api_address"].rstrip("/")
+    api_key = account["api_key"]
 
     if not api_key:
         return True
 
-    if not api_address:
-        api_address = DEFAULT_ADDRESSES.get(bot_type, DEFAULT_ADDRESSES["ehArBot"])
-
-    api_address = api_address.rstrip("/")
     bot_type_lower = bot_type.lower()
-    label = get_account_label(index)
+    unit = GP_UNITS.get(bot_type_lower, "GP")
+    label = "默认账号" if index == 0 else f"账号{index}"
 
     log.info("")
     log.info(f"========== {label} ==========")
     log.info(f"协议类型：{bot_type}")
+    log.info(f"API 地址：{api_address}")
 
-    if bot_type_lower in ("eharbot", "eh_ar_bot"):
-        balance = query_balance_eh_ar_bot(api_address, api_key)
-        result = check_in_eh_ar_bot(api_address, api_key)
-    elif bot_type_lower in ("archiveathome", "archive_at_home"):
+    if bot_type_lower in EH_AR_BOT_TYPES:
+        balance = query_balance_eh_ar_bot(api_address, api_key, bot_type)
+        result = check_in_eh_ar_bot(api_address, api_key, bot_type)
+    elif bot_type_lower in ARCHIVE_AT_HOME_TYPES:
         balance = query_balance_archive_at_home(api_address, api_key)
         result = check_in_archive_at_home(api_address, api_key)
     else:
@@ -192,34 +203,20 @@ def process_account(account_config: dict, index: int) -> bool:
         log.info("今日已签到")
     else:
         reward_str = str(result.reward) if result.reward is not None else "?"
-        log.info(f"签到成功：获得{reward_str}GP")
+        log.info(f"签到成功：获得{reward_str}{unit}")
 
     final_balance = result.balance if (result.balance is not None and result.balance > 0) else balance
     balance_str = str(final_balance) if final_balance is not None else "?"
-    log.info(f"当前余额：{balance_str}GP")
+    log.info(f"当前余额：{balance_str}{unit}")
 
     return True
 
 
 def main():
-    config = load_config()
-    archive_config = config.get("archive_bot")
-
-    if not archive_config:
-        log.warning("No 'archive_bot' config found in config.yaml. Skipping.")
-        sys.exit(0)
-
-    accounts: list[dict] = []
-    if isinstance(archive_config, list):
-        accounts = archive_config
-    elif isinstance(archive_config, dict):
-        accounts = [archive_config]
-    else:
-        log.error("'archive_bot' config must be a dict or list of dicts.")
-        sys.exit(1)
+    accounts = load_accounts()
 
     if not accounts:
-        log.warning("No archive bot accounts configured.")
+        log.warning("未配置任何 Archive Bot 账号（ARCHIVE_BOT / ARCHIVE_BOT_1~5 均为空），跳过。")
         sys.exit(0)
 
     log.info("=" * 40)
@@ -234,7 +231,7 @@ def main():
             if not ok:
                 all_success = False
         except Exception as e:
-            log.error(f"{get_account_label(i)} 发生异常: {e}")
+            log.error(f"{'默认账号' if i == 0 else f'账号{i}'} 发生异常: {e}")
             all_success = False
 
     log.info("")
