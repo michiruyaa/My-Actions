@@ -30,14 +30,17 @@
 
 #### Archive Bot 签到配置
 
-| 协议 Secret | 说明 | API 地址 Secret | API Key Secret |
-|-------------|------|-----------------|----------------|
-| `ARCHIVE_BOT_TYPE` | `ehArBot`/`archiveAtHome` | `ARCHIVE_BOT_API_ADDRESS` | `ARCHIVE_BOT_API_KEY` |
+| Secret 名称 | 说明 |
+|-------------|------|
+| `ARCHIVE_BOT` | 协议<br>API 地址<br>API Key |
 
-> 可配置多账户：
-> - `ARCHIVE_BOT_TYPE_1~5`
-> - `ARCHIVE_BOT_API_ADDRESS_1~5`
-> - `ARCHIVE_BOT_API_KEY_1~5`
+示例：
+
+```
+ehArBot
+https://eh-arc-api.mhdy.icu
+xxxx-xxxx-xxxx
+```
 
 #### ESJ Zone 配置
 
